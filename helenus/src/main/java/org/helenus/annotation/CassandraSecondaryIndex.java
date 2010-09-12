@@ -7,7 +7,6 @@ import java.lang.annotation.Target;
 
 @Retention(RetentionPolicy.RUNTIME)
 @Target(ElementType.FIELD)
-public @interface CassandraColumn {
+public @interface CassandraSecondaryIndex {
     String name() default "";
-    String targetSuperColumnField() default "";
 }

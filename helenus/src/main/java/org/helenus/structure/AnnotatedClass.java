@@ -9,6 +9,12 @@ public class AnnotatedClass {
     private String columnFamilyName;
     private Map<String, AnnotatedField> fields = new HashMap<String, AnnotatedField>();
     private String keyFieldName;
+    private boolean dependentKey;
+    private String dependentKeyFieldName;
+    private boolean inverse;
+    private String inverseColumnNameField;
+    private String inverseColumnFamilySuffix;
+    private boolean hasSuperColumn;
 
     public Class<?> getClazz() {
         return clazz;
@@ -33,5 +39,41 @@ public class AnnotatedClass {
     }
     public void setKeyFieldName(String keyFieldName) {
         this.keyFieldName = keyFieldName;
+    }
+    public boolean hasDependentKey() {
+        return dependentKey;
+    }
+    public void setDependentKey(boolean dependentKey) {
+        this.dependentKey = dependentKey;
+    }
+    public String getDependentKeyFieldName() {
+        return dependentKeyFieldName;
+    }
+    public void setDependentKeyFieldName(String dependentKeyFieldName) {
+        this.dependentKeyFieldName = dependentKeyFieldName;
+    }
+    public boolean hasInverse() {
+        return inverse;
+    }
+    public void setInverse(boolean inverse) {
+        this.inverse = inverse;
+    }
+    public String getInverseColumnNameField() {
+        return inverseColumnNameField;
+    }
+    public void setInverseColumnNameField(String inverseColumnNameField) {
+        this.inverseColumnNameField = inverseColumnNameField;
+    }
+    public boolean hasSuperColumn() {
+        return hasSuperColumn;
+    }
+    public void setHasSuperColumn(boolean hasSuperColumn) {
+        this.hasSuperColumn = hasSuperColumn;
+    }
+    public String getInverseColumnFamilySuffix() {
+        return inverseColumnFamilySuffix;
+    }
+    public void setInverseColumnFamilySuffix(String inverseColumnFamilySuffix) {
+        this.inverseColumnFamilySuffix = inverseColumnFamilySuffix;
     }
 }
