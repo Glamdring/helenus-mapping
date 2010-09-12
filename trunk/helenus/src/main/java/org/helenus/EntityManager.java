@@ -20,6 +20,7 @@ import javax.validation.ValidatorFactory;
 import me.prettyprint.cassandra.model.AbstractSliceQuery;
 import me.prettyprint.cassandra.model.ColumnSlice;
 import me.prettyprint.cassandra.model.HColumn;
+import me.prettyprint.cassandra.model.HSuperColumn;
 import me.prettyprint.cassandra.model.HectorTransportException;
 import me.prettyprint.cassandra.model.IndexedSlicesQuery;
 import me.prettyprint.cassandra.model.Mutator;
@@ -27,8 +28,10 @@ import me.prettyprint.cassandra.model.NotFoundException;
 import me.prettyprint.cassandra.model.OrderedRows;
 import me.prettyprint.cassandra.model.Row;
 import me.prettyprint.cassandra.model.Serializer;
+import me.prettyprint.cassandra.model.SliceQuery;
 import me.prettyprint.cassandra.serializers.SerializerTypeInferer;
 import me.prettyprint.cassandra.serializers.StringSerializer;
+import me.prettyprint.cassandra.serializers.UUIDSerializer;
 import me.prettyprint.cassandra.service.CassandraClient;
 import me.prettyprint.cassandra.service.Cluster;
 import me.prettyprint.cassandra.service.spring.HectorTemplate;
@@ -46,8 +49,14 @@ import org.apache.commons.lang.ClassUtils;
 import org.apache.commons.lang.StringUtils;
 import org.helenus.annotation.CassandraColumn;
 import org.helenus.annotation.CassandraColumnFamily;
-import org.helenus.annotation.Key;
-import org.helenus.annotation.SecondaryIndex;
+import org.helenus.annotation.CassandraColumnName;
+import org.helenus.annotation.CassandraDependentKey;
+import org.helenus.annotation.CassandraInverseColumnFamily;
+import org.helenus.annotation.CassandraInverseColumnName;
+import org.helenus.annotation.CassandraKey;
+import org.helenus.annotation.CassandraSecondaryIndex;
+import org.helenus.annotation.CassandraSuperColumn;
+import org.helenus.annotation.CassandraSuperColumnName;
 import org.helenus.structure.AnnotatedClass;
 import org.helenus.structure.AnnotatedField;
 import org.scannotation.AnnotationDB;
@@ -78,7 +87,17 @@ public class EntityManager {
         for (Class<?> clazz : entityClasses) {
             AnnotatedClass ac = new AnnotatedClass();
             ac.setClazz(clazz);
-            String columnFamilyName = clazz.getAnnotation(CassandraColumnFamily.class).name();
+            CassandraColumnFamily cf = clazz.getAnnotation(CassandraColumnFamily.class);
+            if (cf == null) {
+                throw new IllegalStateException("You must not provide classes that are not mapped with @CassandraColumnFamily");
+            }
+            String columnFamilyName = cf.name();
+            CassandraInverseColumnFamily inverseCf = clazz.getAnnotation(CassandraInverseColumnFamily.class);
+            if (inverseCf != null) {
+                ac.setInverse(true);
+                ac.setInverseColumnFamilySuffix(inverseCf.suffix());
+            }
+
             if (columnFamilyName.isEmpty()) {
                 columnFamilyName = clazz.getSimpleName().toLowerCase();
             }
@@ -89,35 +108,117 @@ public class EntityManager {
             for (Field field : fields) {
                 AnnotatedField af = new AnnotatedField();
                 af.setField(field);
+
+                if (field.isAnnotationPresent(CassandraInverseColumnName.class)) {
+                    ac.setInverseColumnNameField(field.getName());
+                }
+
                 CassandraColumn column = field.getAnnotation(CassandraColumn.class);
-                boolean isKey = field.isAnnotationPresent(Key.class);
-                boolean isSecondaryIndex = field.isAnnotationPresent(SecondaryIndex.class);
+                CassandraSuperColumn superColumn = field.getAnnotation(CassandraSuperColumn.class);
+                CassandraColumnName columnNameAnnot = field.getAnnotation(CassandraColumnName.class);
+                CassandraSuperColumnName superColumnNameAnnot = field.getAnnotation(CassandraSuperColumnName.class);
+
+                if (column != null && superColumn != null) {
+                    throw new IllegalStateException("You can't have one field annotated with both @CassandraColumn and @CassandraSuperColumn. Class/Field: " + ac.getClazz().getName() + "/" + field.getName());
+                }
+                if (columnNameAnnot != null && superColumnNameAnnot != null) {
+                    throw new IllegalStateException("You can't have one field annotated with both @CassandraColumnName and @CassandraSuperColumnName. Class/Field: " + ac.getClazz().getName() + "/" + field.getName());
+                }
+
+                boolean isKey = field.isAnnotationPresent(CassandraKey.class);
+                boolean isDependentKey = field.isAnnotationPresent(CassandraDependentKey.class);
+
+                if (isDependentKey && !entityClasses.contains(field.getType())) {
+                    throw new IllegalStateException("Dependent keys can only be defined to other mapped entities. Class/Field: " + clazz.getName() + "/" + field.getName());
+                }
+
+                if (isKey || isDependentKey) {
+                    ac.setKeyFieldName(field.getName());
+                    ac.setDependentKey(true);
+                    continue;
+                }
+                boolean isSecondaryIndex = field.isAnnotationPresent(CassandraSecondaryIndex.class);
 
                 String columnName = getColumnName(field, column);
+                String superColumnName = getSuperColumnName(field, superColumn);
+                String columnNameField = columnNameAnnot != null ? columnNameAnnot.field() : null;
+                String superColumnNameField = superColumnNameAnnot != null ? superColumnNameAnnot.field() : null;
+
                 af.setColumnName(columnName);
+                af.setSuperColumnName(superColumnName);
+                af.setColumnNameField(columnNameField);
+                af.setSuperColumnNameField(superColumnNameField);
 
-                af.setKey(isKey);
-                af.setSecondaryIndex(isSecondaryIndex);
-
+                if (column != null) {
+                    if (!column.targetSuperColumnField().isEmpty()) {
+                        af.setSuperColumnParentName(column.targetSuperColumnField());
+                    }
+                }
                 if (isSecondaryIndex) {
-                    String secondaryIndexName = field.getAnnotation(SecondaryIndex.class).name();
+                    String secondaryIndexName = field.getAnnotation(CassandraSecondaryIndex.class).name();
                     if (secondaryIndexName.isEmpty()) {
                         secondaryIndexName = StringUtils.capitalize(field.getName());
                     }
                     af.setSecondaryIndexName(secondaryIndexName);
                 }
 
-                if (column != null || isKey) {
-                    annotatedFields.put(field.getName(), af);
+                if (superColumn != null || superColumnNameField != null) {
+                    ac.setHasSuperColumn(true);
                 }
 
-                if (isKey) {
-                    ac.setKeyFieldName(field.getName());
+                if (column != null || superColumn != null
+                        || columnNameField != null
+                        || superColumnNameField != null) {
+                    annotatedFields.put(field.getName(), af);
                 }
             }
             ac.setFields(annotatedFields);
             classes.put(clazz, ac);
         }
+
+        try {
+            for (AnnotatedClass ac : classes.values()) {
+                if (ac.hasDependentKey()) {
+                    Field field = ac.getClazz().getDeclaredField(ac.getKeyFieldName());
+                    AnnotatedClass targetMeta = classes.get(field.getType());
+                    ac.setDependentKeyFieldName(targetMeta.getKeyFieldName());
+                }
+
+                if (ac.hasInverse()) {
+                    int superColumns = 0;
+                    int columns = 0;
+                    for (AnnotatedField field : ac.getFields().values()) {
+                        if (field.isSuperColumn()) {
+                            superColumns++;
+                        } else {
+                            columns ++;
+                        }
+                    }
+                    // for inverse, only one super column def is allowed,
+                    // or if no super column exists, only one column def
+                    // (this does not mean the CF will have one column -
+                    // it means the object has one field based on which
+                    // columns are generated
+                    if (superColumns > 1 || (superColumns == 0 && columns > 1)) {
+                        throw new IllegalStateException("For an inverse definition you must have only one SuperColumn, or if you don't have a SuperColumn, you must have only one Column");
+                    }
+                }
+            }
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private String getSuperColumnName(Field field,
+            CassandraSuperColumn superColumn) {
+        if (superColumn == null) {
+            return null;
+        }
+        String columnName = superColumn.name();
+        if (columnName.isEmpty()) {
+            columnName = field.getName();
+        }
+        return columnName;
     }
 
     private String getColumnName(Field field, CassandraColumn column) {
@@ -261,56 +362,137 @@ public class EntityManager {
             throw new ConstraintViolationException(constraintViolations);
         }
 
-        Object key;
+        Object key = getKey(e, meta);
+
+        if (key == null) {
+            logger.debug("Inserting a new entity of type " + e.getClass());
+            return persist(e, meta, UUID.randomUUID());
+        } else {
+            return persist(e, meta, key);
+        }
+    }
+
+    private Object getKey(Object entity, AnnotatedClass meta) {
         try {
-            key = BeanUtils.getProperty(e, meta.getKeyFieldName());
+            if (!meta.hasDependentKey()) {
+                return BeanUtils.getProperty(entity, meta.getKeyFieldName());
+            } else {
+                Object keyHoldingObject = BeanUtils.getProperty(entity, meta.getKeyFieldName());
+                Object key = BeanUtils.getProperty(keyHoldingObject, meta.getDependentKeyFieldName());
+                if (key == null) {
+                    throw new IllegalStateException("The dependee of a dependent key must be set. Class/field: " + meta.getClazz().getName() + " / " + meta.getKeyFieldName());
+                } else {
+                    return key;
+                }
+            }
         } catch (Exception ex) {
             throw new RuntimeException(ex);
         }
-
-        // if it's a new object, insert. otherwise - update
-        if (key == null) {
-            logger.debug("Inserting a new entity of type " + e.getClass());
-            return insert(e, meta);
-        } else {
-            return null;
-        }
-
     }
 
     @SuppressWarnings({ "unchecked", "rawtypes" })
-    private <T> T insert(T e, AnnotatedClass meta) {
-
-        Object key = UUID.randomUUID();
+    private <T> T persist(T e, AnnotatedClass meta, Object key) {
 
         Set<HColumn<String, String>> columns = new HashSet<HColumn<String, String>>();
+        Set<HSuperColumn<?, ?, ?>> superColumns = new HashSet<HSuperColumn<?, ?, ?>>();
+
         try {
             for (AnnotatedField field : meta.getFields().values()) {
-                if (!field.isKey()) {
-                    String value = ConvertUtils.convert(BeanUtils.getProperty(e, field.getField().getName()));
-                    //cassandra not accepting null values
-                    if (value == null) {
-                        value = "";
-                    }
-                    columns.add(hectorTemplate.createColumn(field.getColumnName(), value));
+                String value = ConvertUtils.convert(BeanUtils.getProperty(e, field.getField().getName()));
+                //cassandra not accepting null values
+                if (value == null) {
+                    value = "";
                 }
+                // Nasty parameterization with Object, but no other way
+                if (field.isSuperColumn()) {
+                    List<HColumn<Object,Object>> columnsOfSuperColumn = new ArrayList<HColumn<Object,Object>>();
+                    for (AnnotatedField columnCandidate : meta.getFields().values()) {
+                        HColumn column = hectorTemplate.createColumn(columnCandidate.getColumnName(), value);
+                        columnsOfSuperColumn.add(column);
+                    }
+                    String name = getSuperColumnName(e, field);
+                    HSuperColumn<?,?,?> sc = hectorTemplate.<Object, Object, Object>createSuperColumn(name, columnsOfSuperColumn);
+                    superColumns.add(sc);
+                } else if (!field.hasSuperColumnParent()){ // otherwise they are already created above
 
+                    String name = getColumnName(e, field);
+
+                    columns.add(hectorTemplate.createColumn(name, value));
+                }
             }
             Mutator mutator = hectorTemplate.createMutator();
             String cfName = meta.getColumnFamilyName();
             for (HColumn<String,String> column : columns) {
-                logger.debug("Adding insertion for key: " + key + ", column: " + column + ", cfName:" + cfName);
+                logger.debug("Adding insertion for key: " + key + ", column: " + column.getName() + ", cfName:" + cfName);
                 mutator.addInsertion(key, cfName, column);
             }
 
+            for (HSuperColumn<?, ?, ?> superColumn : superColumns) {
+                logger.debug("Adding insertion for key: " + key + ", superColumn: " + superColumn.getName() + ", cfName:" + cfName);
+                mutator.addInsertion(key, cfName, superColumn);
+            }
+
             mutator.execute();
+
+            handleInverse(e, key, meta, cfName, mutator);
         } catch (Exception ex) {
             throw new RuntimeException(ex);
         }
         return e;
     }
 
-    public <K, T,V> List<T> getByPropertyValue(Class<T> clazz, String propertyName, V value) {
+    private <T> String getColumnName(T e, AnnotatedField field)
+            throws IllegalAccessException, InvocationTargetException,
+            NoSuchMethodException {
+        String name = field.getColumnName();
+        // ie if this has been annotated with @CassandraColumnName
+        if (name == null) {
+            String fieldName = field.getColumnNameField();
+            Object target = BeanUtils.getProperty(e, field.getField().getName());
+            name = BeanUtils.getProperty(target, fieldName);
+        }
+        return name;
+    }
+
+    private <T> String getSuperColumnName(T e, AnnotatedField field)
+            throws IllegalAccessException, InvocationTargetException,
+            NoSuchMethodException {
+        String name = field.getSuperColumnName();
+        // ie if this has been annotated with @CassandraSuperColumnName
+        if (name == null) {
+            String fieldName = field.getSuperColumnNameField();
+            Object target = BeanUtils.getProperty(e, field.getField().getName());
+            name = BeanUtils.getProperty(target, fieldName);
+        }
+        return name;
+    }
+
+    @SuppressWarnings({ "rawtypes", "unchecked" })
+    private <T> void handleInverse(T e, Object key, AnnotatedClass meta,
+            String cfName, Mutator mutator) throws IllegalAccessException,
+            InvocationTargetException, NoSuchMethodException {
+
+        cfName = cfName + meta.getInverseColumnFamilySuffix();
+
+        if (meta.hasInverse()) {
+            Object columnName = BeanUtils.getProperty(e, meta.getInverseColumnNameField());
+            Object value = null;
+            for (AnnotatedField field : meta.getFields().values()) {
+                if (field.isSuperColumn()) {
+                    value = getSuperColumnName(e, field);
+                    break;
+                } else if (!meta.hasSuperColumn()) {
+                    value = getColumnName(e, field);
+                    break;
+                }
+            }
+            HColumn<?,?> column = hectorTemplate.createColumn(columnName, value);
+
+            mutator.insert(key, cfName, column);
+        }
+    }
+
+    public <T,V> List<T> getByPropertyValue(Class<T> clazz, String propertyName, V value) {
         String columnName = "";
         AnnotatedClass meta = getAnnotatedClass(clazz);
 
@@ -322,27 +504,24 @@ public class EntityManager {
         columnName = fld.getColumnName();
 
         Serializer<V> serializer = SerializerTypeInferer.getSerializer(value);
-        IndexedSlicesQuery<K, String, V> query = hectorTemplate.createIndexSlicesQuery(serializer);
+        IndexedSlicesQuery<UUID, String, V> query = hectorTemplate.createIndexSlicesQuery(UUIDSerializer.get(), serializer);
         query.setColumnFamily(meta.getColumnFamilyName());
         fillColumnNames(query, meta);
         query.addEqualsExpression(columnName, value);
 
-        OrderedRows<K, String, V> rows = query.execute().get();
+        OrderedRows<UUID, String, V> rows = query.execute().get();
 
         List<T> result = new ArrayList<T>(rows.getCount());
 
         try {
-            for (Row<K, String, V> row : rows) {
+            for (Row<UUID, String, V> row : rows) {
                 T entity = clazz.newInstance();
                 ColumnSlice<String, V> slice = row.getColumnSlice();
                 for (AnnotatedField af : meta.getFields().values()) {
-                    if (!af.isKey()) {
-                        HColumn<String, V> column = slice.getColumnByName(af.getColumnName());
-                        BeanUtils.setProperty(entity, af.getField().getName(), column.getValue());
-                    } else {
-                        BeanUtils.setProperty(entity, af.getField().getName(), row.getKey());
-                    }
+                    HColumn<String, V> column = slice.getColumnByName(af.getColumnName());
+                    BeanUtils.setProperty(entity, af.getField().getName(), column.getValue());
                 }
+                BeanUtils.setProperty(entity, meta.getKeyFieldName(), row.getKey());
                 result.add(entity);
             }
         } catch (InstantiationException ex) {
@@ -380,5 +559,13 @@ public class EntityManager {
 
     public void setDropKeyspace(boolean dropKeyspace) {
         this.dropKeyspace = dropKeyspace;
+    }
+
+    public <T> List<T> getList(Class<T> clazz, Object id, boolean inverse, int start,
+            int count) {
+        AnnotatedClass meta = classes.get(clazz);
+        SliceQuery query = hectorTemplate.createSliceQuery(null, null, null);
+        //TODO return;
+        return null;
     }
 }
