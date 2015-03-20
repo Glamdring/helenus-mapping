@@ -1,0 +1,1 @@
+Helenus is to Cassandra like ORMs are to relational databases.
